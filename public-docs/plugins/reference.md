@@ -52,12 +52,26 @@ The required root manifest is `paseo-plugin.json`:
 }
 ```
 
-| Field          | Required | Behavior                                                               |
-| -------------- | -------- | ---------------------------------------------------------------------- |
-| `id`           | Yes      | Default installation ID.                                               |
-| `description`  | No       | Non-empty summary shown below the plugin ID in **Settings → Plugins**. |
-| `requirements` | No       | Supported Paseo versions, described below.                             |
-| `build`        | No       | Preparation commands, described in the CLI reference.                  |
+| Field          | Required | Behavior                                                                                  |
+| -------------- | -------- | ----------------------------------------------------------------------------------------- |
+| `id`           | Yes      | Default installation ID.                                                                  |
+| `name`         | No       | Non-empty display name for the registry and website; independent of the installation ID.  |
+| `icon`         | No       | Relative path to a PNG inside the plugin package.                                         |
+| `media`        | No       | Array of image or video paths inside the package, or HTTPS URLs. An empty array is valid. |
+| `description`  | No       | Non-empty summary shown below the plugin ID in **Settings → Plugins**.                    |
+| `requirements` | No       | Supported Paseo versions, described below.                                                |
+| `build`        | No       | Preparation commands, described in the CLI reference.                                     |
+
+Paths are relative to `paseo-plugin.json`, use forward slashes, and cannot contain `..`
+segments. Registry listings for visual plugins require an interface image even though `media` is
+optional in the runtime manifest. See [icons and screenshots](/docs/plugins/publishing#icons-and-screenshots)
+for accepted formats and listing requirements.
+Paseo validates the references without opening local assets or fetching URLs.
+
+Unknown top-level fields are ignored. Known fields still validate, and unknown keys inside
+`requirements` are rejected so a misspelled constraint cannot silently skip a compatibility check.
+Manifests using `name`, `icon`, or `media` require Paseo 0.11.0 or later; older daemons reject
+these fields during installation.
 
 ### Requirements
 
@@ -397,11 +411,14 @@ Built-in session routes:
 | Claude                 | `pi`, `omp` with `anthropic/…` model          | That harness's Anthropic login store                                                           |
 | Codex                  | `codex`                                       | `CODEX_HOME/auth.json`, or the default                                                         |
 | Codex                  | `pi`, `opencode`, `omp` with `openai/…` model | That harness's OpenAI login store                                                              |
+| Cursor                 | `cursor`                                      | cursor-agent's `auth.json` for that session's `XDG_CONFIG_HOME`, `APPDATA`, or home directory  |
 | Muse                   | `muse`                                        | That session's own Muse launch/config                                                          |
 | Other built-in sources | Any                                           | No session discovery                                                                           |
 
 Claude excludes Bedrock, Vertex, and foreign `ANTHROPIC_BASE_URL` sessions. Codex excludes sessions
-with `OPENAI_BASE_URL` set.
+with `OPENAI_BASE_URL` set. Cursor excludes sessions that authenticate with `CURSOR_API_KEY` or
+`CURSOR_AUTH_TOKEN`, and macOS sessions that keep the login in the Keychain, the default unless
+`AGENT_CLI_CREDENTIAL_STORE=file`.
 
 Use a stable account key: 1–128 characters from `[A-Za-z0-9._-]`. It identifies the account or
 organization whose quota is metered and survives token rotation. Never use a credential or raw
@@ -718,10 +735,9 @@ plans, and mode changes; requesting permission does not end the turn.
 | `workspace.created`          | `workspace`                              | Record created; directory available                |
 | `workspace.archived`         | `workspace`                              | Archive state is saved                             |
 
-Agent events exclude internal utility agents. Archive events can precede runtime/worktree cleanup;
-closing an agent that is already closed does not emit another `agent.closed` event.
-During daemon shutdown, pending event hooks have up to five seconds to finish before plugins stop.
-`workspace.created` is not a setup barrier before agent startup.
+Agent events exclude the daemon's private disposable helpers. Public background workspaces and
+their ordinary agents run the same lifecycle hooks as other workspaces. Archive events can precede
+runtime/worktree cleanup; observe lifecycle completion separately when cleanup matters.
 
 **Shared payload shapes** (`@getpaseo/plugin/server`):
 
@@ -775,7 +791,6 @@ type PluginTurnOutcome =
 | `providerOptions`                             | Opaque provider-specific options                                           |
 | `mcpServers`, `toolPolicy`                    | MCP configuration and exact-tool preapprovals                              |
 | `cwd`                                         | Cannot change                                                              |
-| `internal`                                    | Daemon-owned; cannot change through this hook                              |
 
 **`agent.session_open` request example:**
 
@@ -1302,6 +1317,13 @@ deterministic. Paseo memoizes results by source-item reference and derives repla
 the source row, so updates to one streaming item do not remount its renderer. Use the exported
 `useRevealedText(text, phase)` hook when a renderer should pace streaming text like Paseo's built-in
 assistant rows.
+
+Chat find (Ctrl or Cmd+F) finds and highlights text in replacement rows when the query also
+matches the original message. The host searches the original prompt text or the assistant reply
+with Markdown syntax removed, then the app counts matches in the text your renderer draws.
+Text added only by your renderer is not independently indexed. Matches stay within a rendered
+block, and find skips buttons, icons, and anything with `aria-hidden="true"`. Find only runs on
+the web and desktop apps.
 
 ### Append a timeline row from the daemon
 
@@ -2127,7 +2149,7 @@ export default function contribute(server: PluginServerContext) {
 
 Inputs and outputs are validated on both sides. RPC names start with a lowercase letter and contain lowercase letters, numbers, dots, hyphens, or underscores. `useRpc()` returns a typed async function. Use TanStack Query for request state, caching, and mutations.
 
-Backend handlers receive the same `PaseoApi` as `{ paseo }`. Their connection belongs to the subprocess and closes when the plugin stops. It does not subscribe to timelines or catalog events until plugin code subscribes. Follow the [SDK event contract](../../sdk/events.md) for cleanup and timeline replacements. Backend code can use Node APIs and dependencies installed in the plugin directory.
+Backend handlers receive the same `PaseoApi` as `{ paseo }`. Their connection belongs to the subprocess and closes when the plugin stops. It does not subscribe to timelines or catalog events until plugin code subscribes. Follow the [SDK event contract](/docs/sdk/events) for cleanup and timeline replacements. Backend code can use Node APIs and dependencies installed in the plugin directory.
 
 ## Debug backend output
 
@@ -2254,20 +2276,30 @@ remove Command Center items and clear the installation's query state. An already
 remains as unavailable until its matching contribution returns or the user closes it. Panel render
 failures stay inside the plugin error boundary.
 
+Reload queues behind the daemon's other plugin work, such as a running installation or preparation
+command, and the daemon answers when the plugin is running again or has failed. Nothing reads the
+plugin's status as the reload's outcome: while the reload is queued, `plugin ls`, Settings, and the
+logs show the plugin's previous state, and while the daemon stops and starts it, a status read
+reports `failed` because the plugin is absent from the runtime catalog until its start completes.
+
 ## Plugin sources
 
 Paste one of these source identifiers into **Settings → Plugins**, or pass it to
 `paseo plugin install`. `paseo plugin add <source>` and `paseo plugin install <source>` are aliases.
-Absolute host paths are recommended because relative paths resolve against the daemon's working
-directory. The app does not expand `~`; your shell may expand it before the CLI runs.
+The CLI resolves relative directory paths from your current working directory and expands `~`
+to your local home directory, preserving any `:plugin/path` suffix. With `--host`, use an absolute
+path that exists on the daemon host; plugin files are read there and are never uploaded by the CLI.
+Paths entered in Settings resolve relative to the daemon's working directory, and `~` expands to
+the daemon's home directory.
 
 | Source                     | Accepted form                                                              | Example                                       |
 | -------------------------- | -------------------------------------------------------------------------- | --------------------------------------------- |
+| Plugin registry            | `owner/slug` or `host/owner/slug`                                          | `acme/review`                                 |
 | Host directory             | Absolute or relative path on the daemon host                               | `/srv/paseo/plugins/review`                   |
-| GitHub repository          | `github:owner/repository` or `owner/repository`                            | `github:acme/paseo-review`                    |
+| GitHub repository          | `git:owner/repository` or `github:owner/repository`                        | `github:acme/paseo-review`                    |
 | Git repository             | `git:<URL or SCP source>`; the prefix is optional for URLs and SCP sources | `git:https://git.example.com/acme/review.git` |
 | npm package                | `npm:<name>[@<version, tag, or range>]`; `npm:` is optional                | `npm:@acme/paseo-review@^1.2.0`               |
-| Plugin below a source root | Append `:relative/plugin/path` to any source                               | `github:acme/monorepo:plugins/review`         |
+| Plugin below a source root | Append `:relative/plugin/path` to a directory, Git, or npm source          | `github:acme/monorepo:plugins/review`         |
 
 Git URLs use `https://`, `http://`, `ssh://`, `git://`, or `file://`. SCP sources use
 `user@host:path`. `file://` selects Git acquisition, not directory installation.
@@ -2283,24 +2315,27 @@ The package registry validates the selected version, tag, or range.
 
 Paseo resolves an identifier in this order:
 
-1. An existing directory matching the complete identifier on the daemon host wins, including a
-   literal directory containing `:`.
+1. A bare `owner/slug` is a registry id; local directory sources are `.` or `..`, or start with `./`, `../`, `.\`, `..\`, `/`, `~`, a Windows drive (`C:\` or `C:/`), or a UNC (`\\server\share`) prefix.
 2. Otherwise, recognize `npm:`, `github:`, or `git:` before interpreting a subdirectory suffix.
    `git://` is a Git URL scheme. An explicit prefix selects acquisition of that kind.
 3. Recognize a final `:relative/plugin/path` only when its suffix contains no empty, `.` or `..`
    segments. A lone `.` selects the source root. Both `/` and `\` separate suffix segments; use `/`
    across hosts. URL ports and the separator in an SCP source stay part of the source. A suffix
    that does not satisfy these rules stays part of the identifier.
-4. Without an explicit prefix, an existing directory matching the remaining source wins.
-5. Resolve Git URLs and SCP sources as Git; expand exact `owner/repository` shorthand to GitHub
-   HTTPS. `github:` requires that shorthand; `git:` accepts it as well as URLs and SCP sources.
-6. Resolve a remaining npm package name with its optional selector through the host's registry.
+4. Resolve bare `owner/slug` through the default plugin registry and `host/owner/slug` through
+   that registry host. Resolve Git URLs and SCP sources as Git. `github:` requires
+   `owner/repository` shorthand; `git:` accepts it as well as URLs and SCP sources.
+5. Resolve a remaining npm package name with its optional selector through the host's registry.
    Reject anything else.
 
-Plugin registry installs are off by default. When the daemon enables them with
-`pluginRegistryEnabled: true` or `PASEO_PLUGIN_REGISTRY_ENABLED=1`, bare `owner/slug` and
-`host/owner/slug` resolve through the plugin registry instead of GitHub, the registry record owns
-the revision and plugin path, and GitHub shorthand requires `github:`.
+The default registry is `https://plugins.paseo.sh`. Browse [published plugins](https://paseo.sh/plugins)
+and install with `paseo plugin add owner/slug`. Registry records own the revision and plugin path.
+Use `git:owner/repository` for explicit GitHub shorthand or a full Git URL.
+Set `PASEO_PLUGIN_REGISTRY` to use a self-hosted default URL, including a path prefix.
+Private registry credentials use `pluginRegistries: { "host": { "authorization": "Bearer token" } }`
+in daemon config. Restart the daemon after changing these startup settings. Credentials go only
+to that registry, never to artifact hosts or redirects. Installed plugins retain their recorded
+source and registry URL when defaults change.
 
 Directory lookup happens on the daemon host. The app uses the `paseo-plugin.json` ID; the CLI
 accepts `--id <runtime-id>` to override it. An existing installation ID is rejected without changing
@@ -2334,8 +2369,9 @@ keeps the complete dependency tree and `package-lock.json` when activating it. T
 package and lockfile provide its current version and artifact integrity. A version, tag, or range
 chooses content for this installation only.
 
-For package contents, dependencies, preparation, and private registries, see
-[Publish a plugin](/docs/plugins/publishing).
+The installed lockfile records what this installation resolved. Authors submitting npm plugins
+with runtime dependencies must also ship the [publication lock](/docs/plugins/publishing#2-lock-installed-dependencies).
+For package contents, preparation and submission, see [Publish a plugin](/docs/plugins/publishing).
 
 A failed download, dependency installation, manifest check, preparation command, compilation, or
 activation discards the candidate. Other installed plugins keep running. Removing an npm plugin
@@ -2347,9 +2383,10 @@ deletes its managed files; removing a directory plugin keeps your source directo
 paseo plugin init /absolute/path/to/plugin
 paseo plugin install /absolute/path/to/plugin
 paseo plugin install /absolute/path/to/plugin --id another-runtime-id
-paseo plugin add owner/repository
+paseo plugin add owner/slug
+paseo plugin add git:owner/repository
 paseo plugin add https://git.example.com/owner/repository.git --ref main
-paseo plugin add owner/monorepo:plugins/review
+paseo plugin add git:owner/monorepo:plugins/review
 paseo plugin ls [id]
 paseo plugin update <id>
 paseo plugin update --all --check

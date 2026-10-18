@@ -34,6 +34,7 @@ export const ACP_PROVIDER_ICON_NAMES = [
   "goose",
   "grok",
   "hermes",
+  "hoplite",
   "junie",
   "kilo",
   "kimi",
